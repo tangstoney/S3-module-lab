@@ -14,6 +14,12 @@ typedef struct {
 static QueueHandle_t out_events;
 
 bool radar_watch_enabled(void) { return atomic_load(&watch); }
+bool radar_person_present(void)
+{
+    /* Vendor default positive logic: OUT high = occupied. AT+OUT_MODE can
+     * invert it; this project does not change that setting. */
+    return gpio_get_level(LAB_RADAR_OUT) == 1;
+}
 void radar_set_watch(bool on)
 {
     atomic_store(&watch, on);

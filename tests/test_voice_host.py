@@ -19,12 +19,37 @@ sys.path.insert(0, str(ROOT / "tests/.deps"))
 STUBS = r'''
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 typedef int esp_err_t;
 typedef struct { int unused; } lab_uart_t;
 lab_uart_t lab_voice;
 #define ESP_ERR_INVALID_ARG 258
+#define pdTRUE 1
+#define pdFALSE 0
+typedef int BaseType_t;
+typedef unsigned TickType_t;
+typedef void *QueueHandle_t;
+typedef struct {
+    uint8_t len, cmd, count;
+    uint8_t params[8];
+} lab_voice_frame_t;
+#define pdMS_TO_TICKS(ms) (ms)
 static unsigned good_frames, tx_size;
 static uint8_t tx_bytes[256];
+static int xQueueSend(QueueHandle_t q, const void *item, TickType_t ticks) {
+    (void)q; (void)item; (void)ticks; return pdTRUE;
+}
+static int xQueueReset(QueueHandle_t q) { (void)q; return pdTRUE; }
+static int xQueueReceive(QueueHandle_t q, void *item, TickType_t ticks) {
+    (void)q; (void)item; (void)ticks; return pdFALSE;
+}
+static TickType_t xTaskGetTickCount(void) { return 0; }
+void *memcpy(void *d, const void *s, size_t n) {
+    unsigned char *dst=d; const unsigned char *src=s;
+    for(size_t i=0;i<n;i++) dst[i]=src[i];
+    return d;
+}
 void *memmove(void *d, const void *s, size_t n) {
     unsigned char *dst=d; const unsigned char *src=s;
     if(dst<src) for(size_t i=0;i<n;i++) dst[i]=src[i];

@@ -50,6 +50,10 @@ esp_err_t lab_uart_init(lab_uart_t *dev, int baud, uart_word_length_t bits,
 esp_err_t lab_send(lab_uart_t *dev, const uint8_t *data, size_t size)
 {
     if (!data || !size || size > LAB_MAX_SEND_BYTES) return ESP_ERR_INVALID_ARG;
+    if (dev == &lab_voice && voice_downloading()) {
+        puts("[voice] 音频下载进行中，拒绝其他语音发送");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (xSemaphoreTake(dev->tx_lock, pdMS_TO_TICKS(LAB_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
     esp_err_t err = ESP_OK;
@@ -86,9 +90,38 @@ done:
     return err;
 }
 
+esp_err_t lab_send_bulk(lab_uart_t *dev, const uint8_t *data, size_t size)
+{
+    if (!data || !size || size > LAB_VOICE_BULK_MAX) return ESP_ERR_INVALID_ARG;
+    if (xSemaphoreTake(dev->tx_lock, pdMS_TO_TICKS(LAB_LOCK_TIMEOUT_MS)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_OK;
+    int64_t deadline = esp_timer_get_time() + LAB_TX_TIMEOUT_MS * 1000LL;
+    size_t sent = 0;
+    while (sent < size) {
+        if (esp_timer_get_time() >= deadline) { err = ESP_ERR_TIMEOUT; break; }
+        int n = uart_tx_chars(dev->port, (const char *)data + sent, size - sent);
+        if (n < 0) { err = ESP_FAIL; break; }
+        sent += n;
+        if (!n) vTaskDelay(1);
+    }
+    int64_t remaining = deadline - esp_timer_get_time();
+    if (err == ESP_OK)
+        err = remaining > 0 ? uart_wait_tx_done(dev->port,
+            pdMS_TO_TICKS((remaining + 999) / 1000)) : ESP_ERR_TIMEOUT;
+    if (sent) dev->last_tx_us = esp_timer_get_time();
+    xSemaphoreGive(dev->tx_lock);
+    if (err != ESP_OK)
+        printf("[%s] 批量发送失败 %s（已入FIFO %u/%u 字节）\n",
+               dev->name, esp_err_to_name(err), (unsigned)sent, (unsigned)size);
+    return err;
+}
+
 esp_err_t lab_set_baud(lab_uart_t *dev, int baud)
 {
     if (baud < LAB_MIN_BAUD || baud > LAB_MAX_BAUD) return ESP_ERR_INVALID_ARG;
+    if (dev == &lab_voice && voice_downloading())
+        return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(dev->tx_lock, pdMS_TO_TICKS(LAB_LOCK_TIMEOUT_MS)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
     esp_err_t err = uart_wait_tx_done(dev->port, pdMS_TO_TICKS(LAB_LOCK_TIMEOUT_MS));
@@ -139,6 +172,10 @@ void lab_status(void)
     printf("voice UART%d TX=%d RX=%d baud=%" PRIu32 " 8N1 无流控\n",
         lab_voice.port, lab_voice.tx, lab_voice.rx, voice_baud);
     printf("voice BUSY GPIO%d=%d（高=正在播放）\n", LAB_VOICE_BUSY, gpio_get_level(LAB_VOICE_BUSY));
+    printf("alarm %s；PANIC=%s；雷达有人=%d；KEY0=布防/撤防，KEY2=播放Flash %u\n",
+           alarm_armed() ? "布防" : "撤防",
+           alarm_panic_active() ? "是" : "否", radar_person_present(),
+           (unsigned)LAB_ALARM_FLASH_INDEX);
 }
 
 void app_main(void)
@@ -150,8 +187,14 @@ void app_main(void)
         UART_DATA_8_BITS, UART_PARITY_DISABLE, UART_STOP_BITS_1));
     radar_init();
     voice_init();
+    alarm_init();
+    ESP_ERROR_CHECK(key_init());
     lab_status();
     puts("GPIO与摄像头/RGB屏共用，请断开这些外设；PB4完整唤醒时序待确认。");
-    puts("语音按HM01默认9600；远程下载固件默认115200，实物版本待确认。");
+    puts("语音115200（厂家确认实物固件）");
+    esp_err_t ble_err = ble_central_init();
+    if (ble_err != ESP_OK)
+        printf("[ble] 初始化失败 %s；雷达/语音/按键继续运行\n",
+               esp_err_to_name(ble_err));
     shell_init();
 }

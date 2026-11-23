@@ -1,0 +1,48 @@
+menu "s3_module_lab"
+
+    config LAB_VOICE_DOWNLOAD_AUDIO
+        bool "Embed audio/0001.wav and enable voice file download"
+        default n
+        help
+            Embeds main/audio/0001.wav (about 94 KiB) into the app and enables
+            the `voice download [f1|f6]` shell command, which writes the file to
+            the WT2003Hx module over UART using its remote-download protocol
+            (F1/F6 create file, FD size, F0 data packets).
+
+            Keep this disabled for normal development so the app image stays
+            small and `idf.py flash` does not rewrite the audio.
+
+    config LAB_BLE_FOB_NAME
+        string "BLE fob advertising name (normal commands)"
+        default "S3-FOB"
+        help
+            Exact local name the central matches for normal fob commands.
+            The fob advertises it in the scan response.
+
+    config LAB_BLE_FOB_PAIR_NAME
+        string "BLE fob pairing-window advertising name"
+        default "S3-FOB-PAIR"
+        help
+            Exact local name the central matches only while the user has
+            opened the host pairing window with KEY3 long-press or `ble pair`.
+
+    config LAB_BLE_SMOKE_NAME
+        string "BLE smoke advertising name"
+        default "s3-smoke"
+
+    config LAB_BLE_SCAN_ACTIVE
+        bool "Use active BLE scan (send SCAN_REQ)"
+        default y
+        help
+            Active scan also receives scan responses. Disable only if both
+            peripherals put their names in the advertising PDU.
+
+    config LAB_BLE_SMOKE_HOOK
+        bool "Bench hook: smoke notify first byte != 0 = smoke alarm"
+        default n
+        help
+            Temporary mapping only. s3-smoke has no assigned GATT UUID or
+            binary protocol yet. The hook sets the alarm smoke flag, which is
+            OR-ed with the radar/panic condition while armed.
+
+endmenu

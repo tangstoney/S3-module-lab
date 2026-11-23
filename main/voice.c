@@ -1,8 +1,47 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 #include "config.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
+
+static QueueHandle_t frames;
+static atomic_bool quiet;
+
+static void voice_publish(const uint8_t *frame)
+{
+    lab_voice_frame_t ev = {
+        .len = frame[1], .cmd = frame[2], .count = (uint8_t)(frame[1] - 3),
+    };
+    size_t n = ev.count > sizeof(ev.params) ? sizeof(ev.params) : ev.count;
+    memcpy(ev.params, frame + 3, n);
+    if (frames) xQueueSend(frames, &ev, 0);
+}
+
+void voice_flush_frames(void)
+{
+    if (frames) xQueueReset(frames);
+}
+
+void voice_set_quiet(bool on)
+{
+    atomic_store(&quiet, on);
+}
+
+bool voice_take_frame(uint8_t cmd, uint8_t len, int timeout_ms, lab_voice_frame_t *out)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        TickType_t now = xTaskGetTickCount();
+        if (!frames || (int32_t)(deadline - now) <= 0) return false;
+        lab_voice_frame_t ev;
+        if (xQueueReceive(frames, &ev, deadline - now) != pdTRUE) return false;
+        if ((!cmd || ev.cmd == cmd) && (!len || ev.len == len)) {
+            if (out) *out = ev;
+            return true;
+        }
+    }
+}
 
 /* HM01 V1.04: length = length+command+parameters+checksum (3+parameter count).
  * Total frame size is length+2; checksum excludes 7E, checksum itself and EF. */
@@ -89,7 +128,8 @@ static void parser_scan(voice_parser_t *p)
             parser_drop(p, 1);
             continue;
         }
-        voice_report(p->bytes);
+        voice_publish(p->bytes);
+        if (!atomic_load(&quiet)) voice_report(p->bytes);
         parser_drop(p, total);
     }
 }
@@ -138,7 +178,7 @@ static void voice_rx_task(void *arg)
         int64_t now = esp_timer_get_time();
         /* Parse before slow UART0 printing; timeout is measured at read, not after dump. */
         parser_feed(&parser, bytes, n, now);
-        lab_dump("voice", bytes, n);
+        if (!atomic_load(&quiet)) lab_dump("voice", bytes, n);
     }
 }
 
@@ -147,6 +187,8 @@ void voice_init(void)
     gpio_config_t cfg = { .pin_bit_mask = 1ULL << LAB_VOICE_BUSY, .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE };
     ESP_ERROR_CHECK(gpio_config(&cfg));
+    frames = xQueueCreate(32, sizeof(lab_voice_frame_t));
+    ESP_ERROR_CHECK(frames ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(voice_rx_task, "voice_rx", LAB_RX_STACK_BYTES, NULL,
         LAB_TASK_PRIORITY, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }

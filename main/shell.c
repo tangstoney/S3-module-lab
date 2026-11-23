@@ -18,7 +18,13 @@ static const char uart_usage[] =
     "uart text radar|voice \"文本\" [--eol none|cr|lf|crlf]\n"
     "uart hex radar|voice <两位HEX字节...>";
 static const char voice_usage[] =
-    "voice status | volume [0..31] | play flash|usb <0..65535索引> | stop | query count|track|devices";
+    "voice status | next | volume [0..31] | play flash|usb <0..65535索引> | stop | query count|track|devices\n"
+    "voice loop on|off  (on=单曲循环, off=单曲不循环)\n"
+    "voice download [f1|f6]  (f1=片外Flash, f6=片内Flash, 默认自动尝试)";
+static const char ble_usage[] =
+    "ble status | scan on|off | pair\n"
+    "ble connect fob|smoke|all | disconnect fob|smoke|all\n"
+    "ble log fob|smoke|all on|off";
 
 static int usage(const char *text) { printf("用法: %s\n", text); return 1; }
 static int result(esp_err_t err)
@@ -132,6 +138,8 @@ static int voice_cmd(int argc, char **argv)
 {
     if (argc < 2) return usage(voice_usage);
     if (!strcmp(argv[1], "status") && argc == 2) return result(voice_command(0xc2, NULL, 0));
+    if (!strcmp(argv[1], "next") && argc == 2)
+        return result(voice_command(LAB_VOICE_CMD_NEXT, NULL, 0));
     if (!strcmp(argv[1], "stop") && argc == 2) return result(voice_command(0xab, NULL, 0));
     if (!strcmp(argv[1], "volume")) {
         if (argc == 2) return result(voice_command(0xc1, NULL, 0));
@@ -150,6 +158,13 @@ static int voice_cmd(int argc, char **argv)
         else return usage(voice_usage);
         return result(voice_command(cmd, params, sizeof(params)));
     }
+    if (!strcmp(argv[1], "loop") && argc == 3) {
+        uint8_t param;
+        if (!strcmp(argv[2], "on")) param = LAB_VOICE_LOOP_SINGLE;
+        else if (!strcmp(argv[2], "off")) param = LAB_VOICE_LOOP_OFF;
+        else return usage(voice_usage);
+        return result(voice_command(LAB_VOICE_CMD_LOOP, &param, 1));
+    }
     if (!strcmp(argv[1], "query") && argc == 3) {
         uint8_t cmd;
         if (!strcmp(argv[2], "count")) cmd = 0xc3;
@@ -158,7 +173,83 @@ static int voice_cmd(int argc, char **argv)
         else return usage(voice_usage);
         return result(voice_command(cmd, NULL, 0));
     }
+    if (!strcmp(argv[1], "download")) {
+        voice_flash_t flash = VOICE_FLASH_AUTO;
+        if (argc == 3) {
+            if (!strcmp(argv[2], "f1")) flash = VOICE_FLASH_EXTERNAL;
+            else if (!strcmp(argv[2], "f6")) flash = VOICE_FLASH_INTERNAL;
+            else return usage(voice_usage);
+        } else if (argc != 2) return usage(voice_usage);
+        return result(voice_download_audio(flash));
+    }
     return usage(voice_usage);
+}
+
+static int alarm_cmd(int argc, char **argv)
+{
+    if (argc == 1) {
+        printf("alarm %s，PANIC=%s，报警条件=%s\n",
+               alarm_armed() ? "on（布防）" : "off（撤防）",
+               alarm_panic_active() ? "是" : "否",
+               alarm_condition() ? "成立" : "不成立");
+        return 0;
+    }
+    if (argc != 2) return usage("alarm [on|off]");
+    bool on;
+    if (!on_off(argv[1], &on)) return usage("alarm [on|off]");
+    alarm_set_armed(on);
+    return 0;
+}
+
+static int ble_dev_arg(const char *s)
+{
+    if (!strcmp(s, "fob")) return BLE_DEV_FOB;
+    if (!strcmp(s, "smoke")) return BLE_DEV_SMOKE;
+    if (!strcmp(s, "all")) return BLE_DEV_ALL;
+    return -1;
+}
+
+static int ble_cmd(int argc, char **argv)
+{
+    if (argc == 1 || (!strcmp(argv[1], "status") && argc == 2)) {
+        ble_status();
+        return 0;
+    }
+    if (!strcmp(argv[1], "scan") && argc == 3) {
+        bool on;
+        if (!on_off(argv[2], &on)) return usage(ble_usage);
+        return result(ble_scan_set(on));
+    }
+    if (!strcmp(argv[1], "pair") && argc == 2)
+        return result(ble_central_pairing_toggle());
+    if ((!strcmp(argv[1], "connect") || !strcmp(argv[1], "disconnect")) &&
+        argc == 3) {
+        int dev = ble_dev_arg(argv[2]);
+        if (dev < 0) return usage(ble_usage);
+        return result(!strcmp(argv[1], "connect")
+                      ? ble_connect_dev(dev) : ble_disconnect_dev(dev));
+    }
+    if (!strcmp(argv[1], "log") && argc == 4) {
+        int dev = ble_dev_arg(argv[2]);
+        bool on;
+        if (dev < 0 || !on_off(argv[3], &on)) return usage(ble_usage);
+        return result(ble_log_set(dev, on));
+    }
+    return usage(ble_usage);
+}
+
+static int key_cmd(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) return usage("key");
+    uint8_t port1;
+    esp_err_t err = key_read_port1(&port1);
+    if (err != ESP_OK) return result(err);
+    printf("XL9555 P1=0x%02X KEY0=%s KEY2=%s KEY3=%s\n", port1,
+           (port1 & (1u << LAB_KEY0_PORT1_BIT)) ? "松开" : "按下",
+           (port1 & (1u << LAB_KEY2_PORT1_BIT)) ? "松开" : "按下",
+           (port1 & (1u << LAB_KEY3_PORT1_BIT)) ? "松开" : "按下");
+    return 0;
 }
 
 void shell_init(void)
@@ -178,8 +269,13 @@ void shell_init(void)
          .hint=radar_usage, .func=radar_cmd},
         {.command="uart", .help="串口原始透传/ESP端波特率；HEX最多256字节，text默认无结尾",
          .hint=uart_usage, .func=uart_cmd},
-        {.command="voice", .help="HM01语音命令，play使用16位大端文件索引；返回结果异步打印",
+        {.command="voice", .help="HM01语音命令，play使用16位大端文件索引；next=下一曲；download需启用CONFIG_LAB_VOICE_DOWNLOAD_AUDIO",
          .hint=voice_usage, .func=voice_cmd},
+        {.command="alarm", .help="布防/撤防；on=雷达有人时循环播放Flash 8，off=报警静音",
+         .hint="alarm [on|off]", .func=alarm_cmd},
+        {.command="ble", .help="NimBLE主机：KEY3长按/ble pair配对S3-FOB；订阅EVENT并回ACK/STATE",
+         .hint=ble_usage, .func=ble_cmd},
+        {.command="key", .help="读取XL9555 P1并显示KEY0/KEY2/KEY3状态", .func=key_cmd},
     };
     /* The REPL already registers help. */
     for (size_t i = 0; i < sizeof(commands)/sizeof(commands[0]); ++i)
